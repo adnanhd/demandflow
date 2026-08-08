@@ -123,7 +123,7 @@ def _node_process_entry(
 class MultiProcessExecutor:
     """Runs each node in its own process.
 
-    Nodes communicate via zenoh's network transport — each process
+    Nodes communicate via zenoh's network transport -- each process
     opens its own zenoh session and discovers peers automatically.
     Node factories (callables returning a Node) are required because
     nodes must be constructed in the child process.

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import enum
 import inspect
 import logging
@@ -115,7 +117,7 @@ class TransitionError(Exception):
 class LifecycleNode(Node):
     """Node with a managed lifecycle state machine.
 
-    States: unconfigured → inactive → active → finalized
+    States: unconfigured -> inactive -> active -> finalized
     Transitions call on_configure / on_activate / on_deactivate /
     on_cleanup / on_shutdown which subclasses override.
     """
@@ -152,7 +154,7 @@ class LifecycleNode(Node):
             "cleanup": self.on_cleanup,
             "shutdown": self.on_shutdown,
         }[action]
-        logger.info("%s: %s → %s", self.name, self._state.value, target.value)
+        logger.info("%s: %s -> %s", self.name, self._state.value, target.value)
         callback()
         self._state = target
 

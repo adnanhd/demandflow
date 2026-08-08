@@ -14,7 +14,7 @@ Three properties, together:
   whose output is demanded. So if nothing consumes ``D``, the whole ``A->B->D`` /
   ``C->D`` chain -- including pulling the source ``A`` -- never runs.
 * **Dynamic** -- demand is read live from the current subscribers, so
-  ``subscribe`` switches a dormant chain on (the next tick starts pulling its
+  ``subscribe`` switches a dormant chain on (the next flow() starts pulling its
   sources) and ``unsubscribe`` switches it off. Nothing is privileged: the
   training spine runs only because something (torchestrator, streaming the test
   result) subscribes to its sink.
@@ -91,7 +91,7 @@ def _as_outs(out: "str | None", outs: "Sequence[str] | None") -> List[str]:
 class Source:
     """A demand-pulled emission source: ``pull()`` yields the next value (``next()``
     semantics, ``StopIteration`` at end-of-stream), mapped onto ``outs`` via
-    :func:`map_output`. Pulled on a tick ONLY when some out is demanded."""
+    :func:`map_output`. Pulled on a flow() ONLY when some out is demanded."""
 
     name: str
     outs: List[str]
@@ -326,6 +326,8 @@ class DemandGraph:
             )
             key = node_key(node.name, input_hashes)
             hashes[node.name] = key
+            for topic in node.outs:
+                hashes[topic] = key
 
             hit, cached = self._memo.get(key)
             compute = self._should_compute(policy, hit)
@@ -344,14 +346,27 @@ class DemandGraph:
                 results[node.name] = cached
 
             for topic in node.outs:
+                results[topic] = results[node.name]
                 self._values[topic] = results[node.name]
 
         return results[order[-1].name]
 
     def _topo_sort(self, target: str) -> List[Node]:
         node_map = {n.name: n for n in self._nodes}
-        if target not in node_map:
-            raise KeyError("unknown node: %r" % target)
+        topic_to_node: Dict[str, str] = {}
+        for n in self._nodes:
+            for t in n.outs:
+                topic_to_node[t] = n.name
+
+        def resolve(name_or_topic: str) -> str | None:
+            if name_or_topic in node_map:
+                return name_or_topic
+            return topic_to_node.get(name_or_topic)
+
+        root = resolve(target)
+        if root is None:
+            raise KeyError("unknown node or topic: %r" % target)
+
         visited: Set[str] = set()
         in_stack: Set[str] = set()
         order: List[Node] = []
@@ -366,11 +381,13 @@ class DemandGraph:
             in_stack.add(name)
             visited.add(name)
             for topic in node_map[name].inputs.values():
-                visit(topic)
+                resolved = resolve(topic)
+                if resolved is not None:
+                    visit(resolved)
             in_stack.discard(name)
             order.append(node_map[name])
 
-        visit(target)
+        visit(root)
         return order
 
     def _gather_demand_inputs(
@@ -412,13 +429,13 @@ class DemandGraph:
     # ---- demand (dynamic subscription) ----------------------------------- #
     def subscribe(self, topic: str, callback: Callable[[Any], None]) -> DemandHandler:
         """Register a consumer of ``topic``. Creates demand: the next
-        :meth:`tick` will pull whatever sources feed it, transitively."""
+        :meth:`flow` will pull whatever sources feed it, transitively."""
         self._subs.setdefault(topic, []).append(callback)
         return DemandHandler(topic, callback)
 
     def unsubscribe(self, hdlr: DemandHandler) -> None:
         """Drop a subscriber. If it was the last demand on a chain, subsequent
-        ticks stop pulling that chain's sources."""
+        flows stop pulling that chain's sources."""
         subs = self._subs.get(hdlr.topic)
         if subs and hdlr.callback in subs:
             subs.remove(hdlr.callback)
@@ -477,8 +494,8 @@ class DemandGraph:
         return {t for t in topics if self.is_demanded(t)}
 
     # ---- execution ------------------------------------------------------- #
-    def tick(self) -> bool:
-        """One orchestra round: pull every DEMANDED source, cascade through
+    def flow(self) -> bool:
+        """One streaming round: pull every DEMANDED source, cascade through
         demanded barrier nodes, deliver to subscribers. Returns True if any
         source emitted (False = fully dormant: nothing demanded)."""
         for node in self._nodes:
@@ -636,5 +653,5 @@ class DemandGraph:
         if policy.mode == CachePolicy.ACCEPT:
             return not has_cached
         if policy.mode == CachePolicy.FRESH:
-            return not has_cached
+            return True
         return True
