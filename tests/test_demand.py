@@ -1,6 +1,7 @@
 import pytest
 
 from demandflow.demand import DemandGraph
+from demandflow.qos import QoS
 
 
 class TestTopicSchema:
@@ -12,8 +13,7 @@ class TestTopicSchema:
             dtype: str
 
         g = DemandGraph()
-        g.source("src", pull=lambda: {"shape": [2, 3], "dtype": "float32"}, out="tensor_meta")
-        g.topic_schema("tensor_meta", TensorMeta)
+        g.topic("tensor_meta", schema=TensorMeta)
         g.inject("tensor_meta", {"shape": [2, 3], "dtype": "float32"})
         result = g.serialize_topic("tensor_meta")
         assert result == {"shape": [2, 3], "dtype": "float32"}
@@ -25,7 +25,7 @@ class TestTopicSchema:
             shape: list[int]
 
         g = DemandGraph()
-        g.topic_schema("tensor_meta", TensorMeta)
+        g.topic("tensor_meta", schema=TensorMeta)
         with pytest.raises(ValidationError):
             g.inject("tensor_meta", {"shape": "not_a_list"})
 
@@ -38,3 +38,29 @@ class TestTopicSchema:
         g.inject("out", 42)
         with pytest.raises(TypeError):
             g.serialize_topic("out")
+
+    def test_topic_with_qos(self):
+        from pydantic import BaseModel
+
+        class Msg(BaseModel):
+            value: int
+
+        g = DemandGraph()
+        qos = QoS(reliability="best_effort", deadline=1.0)
+        g.topic("sensor", schema=Msg, qos=qos)
+        g.inject("sensor", {"value": 42})
+        assert g._qos["sensor"] is qos
+        assert g._schemas["sensor"] is Msg
+
+    def test_topic_schema_compat(self):
+        """topic_schema() still works as alias."""
+        from pydantic import BaseModel, ValidationError
+
+        class Epoch(BaseModel):
+            value: int
+
+        g = DemandGraph()
+        g.topic_schema("epoch", Epoch)
+        g.inject("epoch", {"value": 5})
+        with pytest.raises(ValidationError):
+            g.inject("epoch", {"value": "bad"})

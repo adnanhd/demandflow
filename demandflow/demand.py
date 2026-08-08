@@ -54,6 +54,7 @@ from demandflow.annotations import Demand as DemandMarker, Flow as FlowMarker
 from demandflow.hasher import content_hash, node_key
 from demandflow.memo import MemoStore
 from demandflow.policy import CachePolicy, ResourcePolicy
+from demandflow.qos import QoS
 
 logger = logging.getLogger(__name__)
 
@@ -275,6 +276,7 @@ class DemandGraph:
         self._subs: Dict[str, List[Callable[[Any], None]]] = {}
         self._values: Dict[str, Any] = {}
         self._schemas: Dict[str, type] = {}
+        self._qos: Dict[str, "QoS"] = {}
         self._relations: Dict[str, "Relation"] = {}
         self._memo = memo or MemoStore()
         #: instrumentation counters (per name): how often each source was pulled
@@ -630,8 +632,24 @@ class DemandGraph:
             for topic, value in map_output(rec.outs, output).items():
                 self._publish(topic, value)
 
+    def topic(
+        self,
+        name: str,
+        *,
+        schema: "type | None" = None,
+        qos: "QoS | None" = None,
+    ) -> None:
+        """Declare a topic with optional schema and QoS."""
+        if schema is not None:
+            self._schemas[name] = schema
+        if qos is not None:
+            self._qos[name] = qos
+
     def topic_schema(self, topic: str, schema: type) -> None:
-        """Attach a pydantic schema to a topic for publish-time validation."""
+        """Attach a pydantic schema to a topic for publish-time validation.
+
+        Prefer :meth:`topic` for new code.
+        """
         self._schemas[topic] = schema
 
     def serialize_topic(self, topic: str) -> dict:
