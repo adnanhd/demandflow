@@ -48,8 +48,9 @@ import logging
 import queue
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Sequence, Set
+from typing import Any, Callable, Dict, List, Sequence, Set, get_type_hints
 
+from demandflow.annotations import Demand as DemandMarker, Flow as FlowMarker
 from demandflow.hasher import content_hash, node_key
 from demandflow.memo import MemoStore
 from demandflow.policy import CachePolicy, ResourcePolicy
@@ -64,6 +65,81 @@ __all__ = [
     "Recurrence",
     "map_output",
 ]
+
+
+def _extract_demands(fn: Callable) -> Dict[str, DemandMarker]:
+    """Extract {param_name: DemandMarker} from Annotated hints."""
+    globalns = getattr(fn, "__globals__", {})
+    try:
+        hints = get_type_hints(fn, globalns=globalns, include_extras=True)
+    except Exception:
+        hints = {}
+    result: Dict[str, DemandMarker] = {}
+    for param, hint in hints.items():
+        if param == "return":
+            continue
+        args = getattr(hint, "__metadata__", ())
+        for meta in args:
+            if isinstance(meta, DemandMarker):
+                result[param] = meta
+                break
+    return result
+
+
+class Relation:
+    """A parametric node template that generates demand chains.
+
+    Given a key (e.g. a config object or epoch number), resolves
+    dependencies recursively via ``Demand(resolver)`` annotations,
+    hitting base cases or memo cache along the way.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        fn: Callable,
+        deps: Dict[str, DemandMarker],
+        memo: MemoStore,
+    ) -> None:
+        self.name = name
+        self.fn = fn
+        self.deps = deps
+        self._bases: Dict[Any, Any] = {}
+        self._memo = memo
+        sig = inspect.signature(fn)
+        params = list(sig.parameters.keys())
+        self._key_param = params[0] if params else None
+
+    def base(self, key: Any, value: Any) -> None:
+        """Register a base case: when ``key`` is demanded, return ``value``."""
+        self._bases[key] = value
+
+    def resolve(self, key: Any, policy: CachePolicy | None = None) -> Any:
+        """Recursively resolve the relation for ``key``."""
+        if policy is None:
+            policy = CachePolicy()
+        cache_key = node_key(self.name, {self.name: content_hash(key)})
+
+        if key in self._bases:
+            return self._bases[key]
+
+        hit, cached = self._memo.get(cache_key)
+        if hit and policy.mode == CachePolicy.ACCEPT:
+            return cached
+
+        kwargs = {}
+        for param, demand in self.deps.items():
+            dep_key = demand.resolve(key)
+            if dep_key in self._bases:
+                kwargs[param] = self._bases[dep_key]
+            else:
+                kwargs[param] = self.resolve(dep_key, policy)
+
+        if self._key_param is not None:
+            kwargs[self._key_param] = key
+        result = self.fn(**kwargs)
+        self._memo.put(cache_key, result)
+        return result
 
 
 def map_output(outs: Sequence[str], output: Any) -> Dict[str, Any]:
@@ -198,6 +274,8 @@ class DemandGraph:
         self._producer: Dict[str, Any] = {}          # topic -> Source|Node|Recurrence
         self._subs: Dict[str, List[Callable[[Any], None]]] = {}
         self._values: Dict[str, Any] = {}
+        self._schemas: Dict[str, type] = {}
+        self._relations: Dict[str, "Relation"] = {}
         self._memo = memo or MemoStore()
         #: instrumentation counters (per name): how often each source was pulled
         #: and each node fired -- the observable proof of laziness in tests.
@@ -552,7 +630,27 @@ class DemandGraph:
             for topic, value in map_output(rec.outs, output).items():
                 self._publish(topic, value)
 
+    def topic_schema(self, topic: str, schema: type) -> None:
+        """Attach a pydantic schema to a topic for publish-time validation."""
+        self._schemas[topic] = schema
+
+    def serialize_topic(self, topic: str) -> dict:
+        """Validate current topic value and return as serializable dict."""
+        schema = self._schemas.get(topic)
+        if schema is None:
+            raise TypeError(f"no schema registered for topic {topic!r}")
+        value = self._values[topic]
+        if isinstance(value, dict):
+            return schema.model_validate(value).model_dump()
+        return schema.model_validate(value, from_attributes=True).model_dump()
+
     def _publish(self, topic: str, value: Any) -> None:
+        schema = self._schemas.get(topic)
+        if schema is not None:
+            if isinstance(value, dict):
+                schema.model_validate(value)
+            else:
+                schema.model_validate(value, from_attributes=True)
         self._values[topic] = value
         for callback in list(self._subs.get(topic, [])):
             callback(value)
@@ -655,3 +753,53 @@ class DemandGraph:
         if policy.mode == CachePolicy.FRESH:
             return True
         return True
+
+    # ---- parametric relations ----------------------------------------------- #
+    def relation(
+        self,
+        fn: Callable | None = None,
+        *,
+        name: str | None = None,
+    ) -> Callable:
+        """Decorator: register a parametric relation.
+
+        The decorated function's annotations declare dependencies via
+        ``Annotated[T, Demand(...)]`` and output via return annotation
+        ``Annotated[T, Flow("name")]``.
+
+        Usage::
+
+            @graph.relation
+            def train(
+                config,
+                prev: Annotated[Model, Demand(lambda c: c.parent)],
+                data: Annotated[Dataset, Demand("cifar10")],
+            ):
+                ...
+
+            graph.base("train", base_config, fresh_model)
+            model = graph.demand_relation("train", final_config)
+        """
+        def decorator(f: Callable) -> Relation:
+            rel_name = name or f.__name__
+            deps = _extract_demands(f)
+            rel = Relation(rel_name, f, deps, self._memo)
+            self._relations[rel_name] = rel
+            return rel
+        if fn is not None:
+            return decorator(fn)
+        return decorator
+
+    def demand_relation(
+        self,
+        name: str,
+        key: Any,
+        policy: CachePolicy | None = None,
+    ) -> Any:
+        """Resolve a parametric relation for the given key.
+
+        Walks the demand chain backwards until base cases are hit,
+        then computes forward, memoizing each step.
+        """
+        rel = self._relations[name]
+        return rel.resolve(key, policy or CachePolicy())
