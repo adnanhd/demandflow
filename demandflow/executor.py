@@ -8,7 +8,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
-from ondemand.node import LifecycleNode, LifecycleState, Node
+from demandflow.node import LifecycleNode, LifecycleState, Node
 
 logger = logging.getLogger(__name__)
 

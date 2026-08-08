@@ -6,7 +6,7 @@ from typing import Any, Callable
 
 import zenoh
 
-from ondemand.qos import DEFAULT_QOS, QoS
+from demandflow.qos import DEFAULT_QOS, QoS
 
 
 class Context:

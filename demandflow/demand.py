@@ -43,11 +43,21 @@ can be tested in isolation.
 
 from __future__ import annotations
 
+import inspect
+import logging
+import queue
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Sequence, Set
 
+from demandflow.hasher import content_hash, node_key
+from demandflow.memo import MemoStore
+from demandflow.policy import CachePolicy, ResourcePolicy
+
+logger = logging.getLogger(__name__)
+
 __all__ = [
-    "LazyFabric",
+    "DemandGraph",
     "Node",
     "Source",
     "DemandHandler",
@@ -109,6 +119,7 @@ class Node:
     fn: Callable[..., Any]
     triggers: List[str] = field(default_factory=list)
     memo: "Callable[..., Any] | None" = None
+    resource: ResourcePolicy = field(default_factory=ResourcePolicy)
     _fresh: Set[str] = field(default_factory=set, repr=False)
     _triggered: bool = field(default=False, repr=False)
 
@@ -170,16 +181,16 @@ class Recurrence:
 
 @dataclass
 class DemandHandler:
-    """Handle returned by :meth:`LazyFabric.subscribe`; pass to ``unsubscribe``."""
+    """Handle returned by :meth:`DemandGraph.subscribe`; pass to ``unsubscribe``."""
 
     topic: str
     callback: Callable[[Any], None]
 
 
-class LazyFabric:
+class DemandGraph:
     """A demand-driven pub/sub dataflow graph (see module docstring)."""
 
-    def __init__(self) -> None:
+    def __init__(self, memo: MemoStore | None = None) -> None:
         self._sources: List[Source] = []
         self._nodes: List[Node] = []
         self._recurrences: List[Recurrence] = []
@@ -187,11 +198,15 @@ class LazyFabric:
         self._producer: Dict[str, Any] = {}          # topic -> Source|Node|Recurrence
         self._subs: Dict[str, List[Callable[[Any], None]]] = {}
         self._values: Dict[str, Any] = {}
-        self._memo_cache: Dict[Any, Any] = {}
+        self._memo = memo or MemoStore()
         #: instrumentation counters (per name): how often each source was pulled
         #: and each node fired -- the observable proof of laziness in tests.
         self.pulls: Dict[str, int] = {}
         self.fires: Dict[str, int] = {}
+        self._demand_policy: CachePolicy = CachePolicy()
+        self._demand_input_hashes: Dict[str, str] = {}
+        self._resource_locks: Dict[str, threading.Lock] = {}
+        self._resource_pools: Dict[str, "queue.Queue[None]"] = {}
 
     # ---- wiring ---------------------------------------------------------- #
     def source(
@@ -217,10 +232,12 @@ class LazyFabric:
         outs: "Sequence[str] | None" = None,
         triggers: "Sequence[str] | None" = None,
         memo: "Callable[..., Any] | None" = None,
+        resource: ResourcePolicy | None = None,
     ) -> Node:
         trigger_list = list(triggers) if triggers else []
         n = Node(name, dict(inputs), _as_outs(out, outs), fn,
-                 triggers=trigger_list, memo=memo)
+                 triggers=trigger_list, memo=memo,
+                 resource=resource or ResourcePolicy())
         for topic in n.outs:
             self._register_producer(topic, n)
         self._nodes.append(n)
@@ -255,6 +272,129 @@ class LazyFabric:
         self._recurrences.append(r)
         self.fires.setdefault(name, 0)
         return r
+
+    @property
+    def memo(self) -> MemoStore:
+        return self._memo
+
+    def compute(
+        self,
+        fn: Callable | None = None,
+        *,
+        name: str | None = None,
+        out: str | None = None,
+        outs: Sequence[str] | None = None,
+        triggers: Sequence[str] | None = None,
+        resource: ResourcePolicy | None = None,
+    ) -> Callable:
+        """Decorator: register a function as a node, inferring inputs from
+        its parameter names.  Each param whose name matches a registered
+        producer topic becomes a data input; the rest raise at demand time
+        unless provided as kwargs."""
+        def decorator(f: Callable) -> Callable:
+            node_name = name or f.__name__
+            params = list(inspect.signature(f).parameters.keys())
+            inputs = {p: p for p in params}
+            out_list = _as_outs(out, outs)
+            if not out_list:
+                out_list = [node_name]
+            self.node(node_name, inputs, f, outs=out_list,
+                      triggers=triggers, resource=resource)
+            return f
+        if fn is not None:
+            return decorator(fn)
+        return decorator
+
+    def demand(
+        self,
+        target: str,
+        policy: CachePolicy | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """One-shot resolve: topologically walk from target back to kwargs,
+        compute or cache each node per policy.  Graph.demand() on the
+        unified fabric."""
+        if policy is None:
+            policy = CachePolicy()
+        order = self._topo_sort(target)
+        results: Dict[str, Any] = {}
+        hashes: Dict[str, str] = {}
+
+        for node in order:
+            node_kwargs, input_hashes = self._gather_demand_inputs(
+                node, results, hashes, kwargs,
+            )
+            key = node_key(node.name, input_hashes)
+            hashes[node.name] = key
+
+            hit, cached = self._memo.get(key)
+            compute = self._should_compute(policy, hit)
+
+            if compute:
+                result = node.fn(**node_kwargs)
+                self._memo.put(key, result)
+                if policy.mode == CachePolicy.CHECK and hit:
+                    if policy.diverged(cached, result):
+                        logger.warning(
+                            "CHECK divergence on %r: cached=%r fresh=%r",
+                            node.name, cached, result,
+                        )
+                results[node.name] = result
+            else:
+                results[node.name] = cached
+
+            for topic in node.outs:
+                self._values[topic] = results[node.name]
+
+        return results[order[-1].name]
+
+    def _topo_sort(self, target: str) -> List[Node]:
+        node_map = {n.name: n for n in self._nodes}
+        if target not in node_map:
+            raise KeyError("unknown node: %r" % target)
+        visited: Set[str] = set()
+        in_stack: Set[str] = set()
+        order: List[Node] = []
+
+        def visit(name: str) -> None:
+            if name not in node_map:
+                return
+            if name in in_stack:
+                raise ValueError("cycle detected involving %r" % name)
+            if name in visited:
+                return
+            in_stack.add(name)
+            visited.add(name)
+            for topic in node_map[name].inputs.values():
+                visit(topic)
+            in_stack.discard(name)
+            order.append(node_map[name])
+
+        visit(target)
+        return order
+
+    def _gather_demand_inputs(
+        self,
+        node: Node,
+        results: Dict[str, Any],
+        hashes: Dict[str, str],
+        kwargs: Dict[str, Any],
+    ) -> "tuple[Dict[str, Any], Dict[str, str]]":
+        node_kwargs: Dict[str, Any] = {}
+        input_hashes: Dict[str, str] = {}
+        for param, topic in node.inputs.items():
+            if topic in results:
+                node_kwargs[param] = results[topic]
+                input_hashes[param] = hashes[topic]
+            elif param in kwargs:
+                node_kwargs[param] = kwargs[param]
+                input_hashes[param] = content_hash(kwargs[param])
+            else:
+                raise TypeError(
+                    "node %r requires input %r: not a registered node "
+                    "and not provided in kwargs" % (node.name, param)
+                )
+        return node_kwargs, input_hashes
 
     def inject(self, topic: str, value: Any) -> None:
         """Push a value onto a topic without a source/node -- for injecting
@@ -411,22 +551,90 @@ class LazyFabric:
             if node.is_ready():
                 self._fire_node(node)
 
+    def _compute_node_key(self, node: Node) -> str:
+        input_hashes: Dict[str, str] = {}
+        for param, topic in node.inputs.items():
+            if topic in self._values:
+                if param in self._demand_input_hashes:
+                    input_hashes[param] = self._demand_input_hashes[param]
+                else:
+                    input_hashes[param] = content_hash(self._values[topic])
+            else:
+                input_hashes[param] = "missing"
+        return node_key(node.name, input_hashes)
+
+    def _ensure_resource(self, resource: ResourcePolicy) -> None:
+        if resource.name not in self._resource_locks:
+            self._resource_locks[resource.name] = threading.Lock()
+        if resource.mode == ResourcePolicy.SHARED:
+            if resource.name not in self._resource_pools:
+                q: queue.Queue[None] = queue.Queue()
+                for _ in range(resource.capacity):
+                    q.put(None)
+                self._resource_pools[resource.name] = q
+
     def _fire_node(self, node: Node) -> None:
         node._fresh.clear()
         node._triggered = False
         kwargs = {p: self._values[t] for p, t in node.inputs.items()}
-        if node.memo is not None:
-            cache_key = node.memo(**kwargs)
-            if cache_key in self._memo_cache:
-                output = self._memo_cache[cache_key]
-                self.fires[node.name] += 1
-                for out_topic, mapped in map_output(node.outs, output).items():
-                    self._publish(out_topic, mapped)
-                return
+        policy = self._demand_policy
+
+        is_sink = not node.outs
+        is_trigger_only = node.triggers and not node.inputs
+
+        if is_sink or is_trigger_only:
             output = node.fn(**kwargs)
-            self._memo_cache[cache_key] = output
         else:
-            output = node.fn(**kwargs)
+            if node.memo is not None:
+                cache_key = node.memo(**kwargs)
+            else:
+                cache_key = self._compute_node_key(node)
+
+            hit, cached = self._memo.get(cache_key)
+            compute = self._should_compute(policy, hit)
+
+            if compute:
+                resource = node.resource
+                self._ensure_resource(resource)
+                if resource.mode == ResourcePolicy.SHARED:
+                    output = self._fire_shared(node, kwargs, resource)
+                else:
+                    output = self._fire_exclusive(node, kwargs, resource)
+                self._memo.put(cache_key, output)
+                if policy.mode == CachePolicy.CHECK and hit:
+                    if policy.diverged(cached, output):
+                        logger.warning(
+                            "CHECK divergence on %r: cached=%r fresh=%r",
+                            node.name, cached, output,
+                        )
+            else:
+                output = cached
+
         self.fires[node.name] += 1
         for out_topic, mapped in map_output(node.outs, output).items():
             self._publish(out_topic, mapped)
+
+    def _fire_exclusive(
+        self, node: Node, kwargs: Dict[str, Any], resource: ResourcePolicy,
+    ) -> Any:
+        lock = self._resource_locks[resource.name]
+        with lock:
+            return node.fn(**kwargs)
+
+    def _fire_shared(
+        self, node: Node, kwargs: Dict[str, Any], resource: ResourcePolicy,
+    ) -> Any:
+        pool = self._resource_pools[resource.name]
+        pool.get()
+        try:
+            return node.fn(**kwargs)
+        finally:
+            pool.put(None)
+
+    @staticmethod
+    def _should_compute(policy: CachePolicy, has_cached: bool) -> bool:
+        if policy.mode == CachePolicy.ACCEPT:
+            return not has_cached
+        if policy.mode == CachePolicy.FRESH:
+            return not has_cached
+        return True

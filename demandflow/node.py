@@ -3,12 +3,12 @@ import inspect
 import logging
 from typing import Any, Callable
 
-from ondemand.action import ActionClient, ActionServer
-from ondemand.context import Context, get_default_context
-from ondemand.qos import DEFAULT_QOS, QoS
-from ondemand.service import ServiceClient, ServiceServer
-from ondemand.timer import Timer
-from ondemand.topic import Publisher, Subscriber
+from demandflow.action import ActionClient, ActionServer
+from demandflow.context import Context, get_default_context
+from demandflow.qos import DEFAULT_QOS, QoS
+from demandflow.service import ServiceClient, ServiceServer
+from demandflow.timer import Timer
+from demandflow.topic import Publisher, Subscriber
 
 logger = logging.getLogger(__name__)
 

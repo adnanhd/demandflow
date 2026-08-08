@@ -4,8 +4,8 @@ import threading
 from collections import deque
 from typing import Any, Callable
 
-from ondemand.context import Context
-from ondemand.qos import DEFAULT_QOS, QoS
+from demandflow.context import Context
+from demandflow.qos import DEFAULT_QOS, QoS
 
 
 class Publisher:

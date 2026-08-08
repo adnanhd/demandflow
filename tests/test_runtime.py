@@ -3,7 +3,7 @@ import time
 
 import pytest
 
-import ondemand as od
+import demandflow as od
 
 
 @pytest.fixture
