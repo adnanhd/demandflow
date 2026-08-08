@@ -23,7 +23,7 @@ class TestPubSub:
             received.set()
 
         pub = od.Publisher(ctx, "test/greet")
-        od.Subscription(ctx, "test/greet", callback=on_msg)
+        od.Subscriber(ctx, "test/greet", callback=on_msg)
         time.sleep(0.05)
 
         pub.publish({"hello": "world"})
@@ -34,10 +34,10 @@ class TestPubSub:
         got_data = threading.Event()
         pub = od.Publisher(ctx, "test/poll")
 
-        class PollSub(od.Subscription):
+        class PollSub(od.Subscriber):
             pass
 
-        sub = od.Subscription(ctx, "test/poll")
+        sub = od.Subscriber(ctx, "test/poll")
         # wrap to detect arrival
         orig_deliver = type(sub)._Subscription__on_message if hasattr(type(sub), '_Subscription__on_message') else None
         pub.publish(42)
@@ -59,8 +59,8 @@ class TestPubSub:
             barrier.wait()
 
         pub = od.Publisher(ctx, "test/multi")
-        od.Subscription(ctx, "test/multi", callback=on_a)
-        od.Subscription(ctx, "test/multi", callback=on_b)
+        od.Subscriber(ctx, "test/multi", callback=on_a)
+        od.Subscriber(ctx, "test/multi", callback=on_b)
         time.sleep(0.05)
 
         pub.publish("ping")

@@ -16,7 +16,7 @@ from ondemand.policy import CachePolicy
 from ondemand.qos import DEFAULT_QOS, SENSOR_QOS, SERVICE_QOS, QoS
 from ondemand.service import ServiceClient, ServiceServer
 from ondemand.timer import Timer
-from ondemand.topic import Publisher, Subscription
+from ondemand.topic import Publisher, Subscriber
 
 __all__ = [
     "ActionClient",
@@ -41,7 +41,7 @@ __all__ = [
     "ServiceClient",
     "ServiceServer",
     "SingleThreadedExecutor",
-    "Subscription",
+    "Subscriber",
     "Timer",
     "TransitionError",
     "get_default_context",

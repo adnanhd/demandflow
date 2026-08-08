@@ -24,7 +24,7 @@ class Publisher:
         self._context.publish(self._topic, data)
 
 
-class Subscription:
+class Subscriber:
     """Subscribes to a named topic, delivering via callback or polling."""
 
     def __init__(

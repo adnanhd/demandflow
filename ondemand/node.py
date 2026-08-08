@@ -8,7 +8,7 @@ from ondemand.context import Context, get_default_context
 from ondemand.qos import DEFAULT_QOS, QoS
 from ondemand.service import ServiceClient, ServiceServer
 from ondemand.timer import Timer
-from ondemand.topic import Publisher, Subscription
+from ondemand.topic import Publisher, Subscriber
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +24,7 @@ class Node:
         self.name = name
         self._context = context or get_default_context()
         self._publishers: list[Publisher] = []
-        self._subscriptions: list[Subscription] = []
+        self._subscriptions: list[Subscriber] = []
         self._services: list[ServiceServer] = []
         self._service_clients: list[ServiceClient] = []
         self._action_servers: list[ActionServer] = []
@@ -40,7 +40,7 @@ class Node:
         return list(self._timers)
 
     @property
-    def subscriptions(self) -> list[Subscription]:
+    def subscriptions(self) -> list[Subscriber]:
         return list(self._subscriptions)
 
     def create_publisher(self, topic: str, qos: QoS = DEFAULT_QOS) -> Publisher:
@@ -53,8 +53,8 @@ class Node:
         topic: str,
         callback: Callable[[Any], None] | None = None,
         qos: QoS = DEFAULT_QOS,
-    ) -> Subscription:
-        sub = Subscription(self._context, topic, callback, qos)
+    ) -> Subscriber:
+        sub = Subscriber(self._context, topic, callback, qos)
         self._subscriptions.append(sub)
         return sub
 
