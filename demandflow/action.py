@@ -9,6 +9,8 @@ from demandflow.context import Context
 
 
 class ActionStatus(str, enum.Enum):
+    """Lifecycle status of an action goal."""
+
     PENDING = "pending"
     RUNNING = "running"
     SUCCEEDED = "succeeded"

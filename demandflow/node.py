@@ -104,6 +104,8 @@ class Node:
 
 
 class LifecycleState(str, enum.Enum):
+    """Managed lifecycle state of a :class:`LifecycleNode`."""
+
     UNCONFIGURED = "unconfigured"
     INACTIVE = "inactive"
     ACTIVE = "active"
@@ -111,7 +113,7 @@ class LifecycleState(str, enum.Enum):
 
 
 class TransitionError(Exception):
-    pass
+    """Raised when a lifecycle transition is not valid from the current state."""
 
 
 class LifecycleNode(Node):

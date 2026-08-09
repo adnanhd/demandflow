@@ -30,7 +30,7 @@ Extended with the Lingua Franca pattern (ports + triggers):
 * **Memo** -- a node can declare a memo function that computes a cache key from
   its inputs.  If the key is already cached, the node skips compute and emits
   the cached output.  This is the content-addressed cache layer (chain
-  checkpoints, eval memoisation).
+  checkpoints, eval memoization).
 
 * **Recurrence** -- a loop node whose output feeds back as its own input for N
   iterations.  ``recurrence("train", inputs, outs, fn, iterations=150)``
@@ -187,7 +187,7 @@ def map_output(outs: Sequence[str], output: Any) -> Dict[str, Any]:
 
 
 def _as_outs(out: "str | None", outs: "Sequence[str] | None") -> List[str]:
-    """Normalise the single-``out`` / multi-``outs`` spelling to a list."""
+    """Normalize the single-``out`` / multi-``outs`` spelling to a list."""
     if outs is not None:
         return list(outs)
     return [out] if out is not None else []
@@ -206,7 +206,7 @@ class Source:
 
 @dataclass
 class Node:
-    """A barrier node with optional triggers and memoisation.
+    """A barrier node with optional triggers and memoization.
 
     Fires when every input topic is fresh AND (if triggers are declared) at least
     one trigger has fired since the last execution.  Publishes ``fn(**inputs)``

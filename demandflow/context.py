@@ -86,6 +86,7 @@ _default_lock = threading.Lock()
 
 
 def get_default_context() -> Context:
+    """Return the process-wide default context, creating it on first call."""
     global _default_context
     if _default_context is not None:
         return _default_context
@@ -97,6 +98,7 @@ def get_default_context() -> Context:
 
 
 def shutdown_default_context() -> None:
+    """Close the default context and clear it so a later call rebuilds one."""
     global _default_context
     if _default_context is not None:
         _default_context.close()
