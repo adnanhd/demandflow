@@ -43,10 +43,13 @@ can be tested in isolation.
 
 from __future__ import annotations
 
+from abc import ABC
+
 import inspect
 import logging
 import queue
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Sequence, Set, get_type_hints
 
@@ -61,11 +64,37 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "DemandGraph",
     "Node",
+    "NodeInterceptor",
     "Source",
     "DemandHandler",
     "Recurrence",
     "map_output",
 ]
+
+
+class NodeInterceptor(ABC):
+    """Hook into node/source execution for observability.
+
+    ``before_node(name, inputs)`` is called before a node computes.
+    ``after_node(name, inputs, duration, error)`` is called after.
+    Same pattern for sources via ``before_source``/``after_source``.
+    """
+
+    def before_node(self, name: str, inputs: Dict[str, Any]) -> None:
+        pass
+
+    def after_node(
+        self, name: str, inputs: Dict[str, Any], duration: float, error: Optional[Exception]
+    ) -> None:
+        pass
+
+    def before_source(self, name: str) -> None:
+        pass
+
+    def after_source(
+        self, name: str, duration: float, error: Optional[Exception]
+    ) -> None:
+        pass
 
 
 def _extract_demands(fn: Callable) -> Dict[str, DemandMarker]:
@@ -267,7 +296,11 @@ class DemandHandler:
 class DemandGraph:
     """A demand-driven pub/sub dataflow graph (see module docstring)."""
 
-    def __init__(self, memo: MemoStore | None = None) -> None:
+    def __init__(
+        self,
+        memo: MemoStore | None = None,
+        interceptors: list[NodeInterceptor] | None = None,
+    ) -> None:
         self._sources: List[Source] = []
         self._nodes: List[Node] = []
         self._recurrences: List[Recurrence] = []
@@ -287,6 +320,7 @@ class DemandGraph:
         self._demand_input_hashes: Dict[str, str] = {}
         self._resource_locks: Dict[str, threading.Lock] = {}
         self._resource_pools: Dict[str, "queue.Queue[None]"] = {}
+        self._interceptors: list[NodeInterceptor] = interceptors or []
 
     # ---- wiring ---------------------------------------------------------- #
     def source(
@@ -585,10 +619,26 @@ class DemandGraph:
         for src in self._sources:
             if not any(self.is_demanded(topic) for topic in src.outs):
                 continue
+            for ic in self._interceptors:
+                ic.before_source(src.name)
+            t0 = time.monotonic()
+            pull_err: Optional[Exception] = None
             try:
                 value = src.pull()
             except StopIteration:
+                dt = time.monotonic() - t0
+                for ic in self._interceptors:
+                    ic.after_source(src.name, dt, None)
                 continue
+            except Exception as e:
+                dt = time.monotonic() - t0
+                pull_err = e
+                for ic in self._interceptors:
+                    ic.after_source(src.name, dt, pull_err)
+                raise
+            dt = time.monotonic() - t0
+            for ic in self._interceptors:
+                ic.after_source(src.name, dt, None)
             self.pulls[src.name] += 1
             emitted = True
             for topic, mapped in map_output(src.outs, value).items():
@@ -712,9 +762,28 @@ class DemandGraph:
         kwargs = {p: self._values[t] for p, t in node.inputs.items()}
         policy = self._demand_policy
 
+        for ic in self._interceptors:
+            ic.before_node(node.name, kwargs)
+        t0 = time.monotonic()
+        node_err: Optional[Exception] = None
+
         is_sink = not node.outs
         is_trigger_only = node.triggers and not node.inputs
 
+        try:
+            self._fire_node_inner(node, kwargs, policy, is_sink, is_trigger_only)
+        except Exception as e:
+            node_err = e
+            raise
+        finally:
+            dt = time.monotonic() - t0
+            for ic in self._interceptors:
+                ic.after_node(node.name, kwargs, dt, node_err)
+
+    def _fire_node_inner(
+        self, node: Node, kwargs: Dict[str, Any],
+        policy: CachePolicy, is_sink: bool, is_trigger_only: bool,
+    ) -> None:
         if is_sink or is_trigger_only:
             output = node.fn(**kwargs)
         else:
