@@ -7,7 +7,7 @@ name = "demandflow"
 version = "0.1.0"
 description = "Flow On-Demand: pull-mode dataflow with content-addressed memoization and ROS2-style nodes/topics/services"
 requires-python = ">=3.8"
-license = "MIT"
+license = { text = "MIT" }
 dependencies = [
     "eclipse-zenoh>=1.0",
 ]
