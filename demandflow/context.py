@@ -4,8 +4,6 @@ import pickle
 import threading
 from typing import Any, Callable
 
-import zenoh
-
 from demandflow.qos import DEFAULT_QOS, QoS
 
 
@@ -16,7 +14,8 @@ class Context:
     A default context is created lazily on first use.
     """
 
-    def __init__(self, config: zenoh.Config | None = None) -> None:
+    def __init__(self, config: "zenoh.Config | None" = None) -> None:
+        import zenoh  # lazy: keep ``import demandflow`` free of the zenoh C-extension
         self._session = zenoh.open(config or zenoh.Config())
         self._publishers: dict[str, zenoh.Publisher] = {}
         self._subscribers: list[zenoh.Subscriber] = []
